@@ -1,0 +1,91 @@
+[project]
+name = "bird-photo-processor"
+version = "0.1.0"
+description = "拍鸟照片过滤器 - 重复检测、质量评估与鸟类识别工具"
+authors = [{name = "Your Name", email = "you@example.com"}]
+requires-python = ">=3.11"
+license = {text = "MIT"}
+readme = "README.md"
+keywords = ["bird", "photo", "deduplication", "quality-assessment", "bird-recognition"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "click>=8.1.0",
+    "Pillow>=10.0.0",
+    "imagehash>=4.3.0",
+    "imagededup>=0.3.0",
+    "brisque>=0.2.0",
+    "loguru>=0.7.0",
+    "tomli>=2.0.0; python_version < '3.11'",
+    "tomli-w>=1.1.0",
+    "watchdog>=3.0.0",
+    "send2trash>=1.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+
+# 可选的鸟类识别依赖
+birder = [
+    "birder>=0.4.0",
+]
+
+# API 依赖
+api = [
+    "httpx>=0.25.0",
+]
+
+all = [
+    "bird-photo-processor[birder,api]",
+]
+
+[project.scripts]
+bird-photo-processor = "src.cli:cli"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --strict-markers"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
