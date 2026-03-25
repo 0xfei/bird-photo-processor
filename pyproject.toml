@@ -56,9 +56,14 @@ api = [
     "httpx>=0.25.0",
 ]
 
+# GUI 依赖
+gui = [
+    "PyQt6>=6.5.0",
+]
+
 # 一键安装所有依赖
 all = [
-    "bird-photo-processor[birder,brisque,api]",
+    "bird-photo-processor[birder,brisque,api,gui]",
 ]
 
 [project.scripts]

@@ -236,6 +236,32 @@ def device(dry_run, verbose):
 
 
 @cli.command()
+@click.argument("path", required=False, type=click.Path(exists=True))
+@click.option("--help", is_flag=True, help="Show help message")
+def gui(path, help):
+    """Open GUI window for photo management."""
+    if help:
+        click.echo("Usage: python -m src.cli gui [PATH]")
+        click.echo("")
+        click.echo("Open a visual window to:")
+        click.echo("  - Browse and preview photos")
+        click.echo("  - View quality scores (clarity, focus, sharpness)")
+        click.echo("  - Select and delete photos")
+        click.echo("  - Lock photos from batch operations")
+        click.echo("  - Filter by quality threshold or species")
+        return
+
+    try:
+        from src.gui.main import run_gui
+
+        run_gui(path if path else None)
+    except ImportError as e:
+        click.echo("Error: PyQt6 is not installed.", err=True)
+        click.echo("Please install it with: pip install PyQt6", err=True)
+        sys.exit(1)
+
+
+@cli.command()
 def watch():
     """Watch for new devices and auto-scan."""
     click.echo("👀 监听新设备插入...")
