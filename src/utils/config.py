@@ -40,6 +40,8 @@ group_output_dir = "duplicates"
 [quality]
 threshold = 40.0
 enabled = true
+# 评估模式: basic (基础) / advanced (三维度详细评估)
+mode = "advanced"
 
 [recognizer]
 type = "birder"
@@ -92,6 +94,7 @@ class DedupConfig:
 class QualityConfig:
     threshold: float = 40.0
     enabled: bool = True
+    mode: str = "advanced"  # basic / advanced
 
 
 @dataclass

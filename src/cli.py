@@ -271,6 +271,7 @@ def config_show():
 
     # Quality
     click.echo("[质量评估]")
+    click.echo(f"  评估模式: {config.quality.mode} (basic/advanced)")
     click.echo(f"  阈值: {config.quality.threshold}")
     click.echo(f"  启用: {config.quality.enabled}")
     click.echo("")

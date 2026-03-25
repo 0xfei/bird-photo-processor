@@ -9,6 +9,7 @@ from loguru import logger
 from src.processor.dedup import Deduplicator
 from src.processor.organizer import FileOrganizer, FilterEngine
 from src.processor.quality import QualityAssessor
+from src.processor.quality_advanced import AdvancedQualityAssessor
 from src.processor.recognizer import BirdRecognizer
 from src.scanner.directory import ImageScanner
 from src.utils.config import Config
@@ -23,7 +24,14 @@ class ProcessingEngine:
 
         # Initialize components
         self.scanner = ImageScanner()
-        self.quality = QualityAssessor(threshold=self.config.quality.threshold)
+
+        # Initialize quality assessor based on config
+        if self.config.quality.mode == "advanced":
+            self.quality = AdvancedQualityAssessor(threshold=self.config.quality.threshold)
+            logger.info("Using advanced quality assessment (3D)")
+        else:
+            self.quality = QualityAssessor(threshold=self.config.quality.threshold)
+            logger.info("Using basic quality assessment")
         self.dedup = Deduplicator(
             threshold=self.config.dedup.similarity_threshold,
             keep_best=self.config.dedup.keep_best_count,

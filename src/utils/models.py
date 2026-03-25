@@ -20,7 +20,10 @@ class ImageInfo:
 
     # Processing results
     hash: Optional[str] = None
-    quality_score: Optional[float] = None
+    quality_score: Optional[float] = None  # 综合质量分数 (0-100)
+    clarity_score: Optional[float] = None  # 清晰度 (0-100)
+    focus_score: Optional[float] = None  # 对焦度 (0-100)
+    sharpness_score: Optional[float] = None  # 边缘锐利度 (0-100)
     bird_species: Optional[str] = None
     bird_species_cn: Optional[str] = None
     bird_confidence: Optional[float] = None
