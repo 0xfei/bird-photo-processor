@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -26,8 +26,12 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QFrame,
-    QScrollArea,
-    QProgressDialog,
+    QTabWidget,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QTextEdit,
+    QProgressBar,
 )
 
 from send2trash import send2trash
@@ -35,7 +39,153 @@ from send2trash import send2trash
 from src.gui.model import PhotoItem, PhotoModel
 from src.scanner.directory import ImageScanner
 from src.processor.engine import ProcessingEngine
-from src.utils.config import Config
+from src.processor.quality_advanced import AdvancedQualityAssessor
+from src.utils.config import Config, get_config
+from src.api.inaturalist import INaturalistClient
+from src.api.ebird import EbirdClient
+
+
+class RecognitionThread(QThread):
+    """Thread for running recognition in background."""
+
+    result_ready = pyqtSignal(dict)
+    progress = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, image_path: str, config: Config):
+        super().__init__()
+        self.image_path = image_path
+        self.config = config
+
+    def run(self):
+        """Run recognition."""
+        try:
+            result = {
+                "image_path": self.image_path,
+                "quality": {},
+                "species": None,
+                "species_cn": None,
+                "confidence": None,
+            }
+
+            # Quality assessment
+            self.progress.emit("正在评估质量...")
+            assessor = AdvancedQualityAssessor(threshold=self.config.quality.threshold)
+
+            from src.utils.models import ImageInfo
+
+            image_info = ImageInfo(path=Path(self.image_path), filename=Path(self.image_path).name)
+
+            image_info = assessor.assess(image_info)
+
+            result["quality"] = {
+                "score": image_info.quality_score,
+                "clarity": image_info.clarity_score,
+                "focus": image_info.focus_score,
+                "sharpness": image_info.sharpness_score,
+                "level": image_info.quality_level,
+            }
+
+            # Species recognition
+            if self.config.recognizer.inat_api_key:
+                self.progress.emit("正在识别物种...")
+                client = INaturalistClient(self.config.recognizer.inat_api_key)
+                species_result = client.identify_species(self.image_path)
+
+                if species_result:
+                    result["species"] = species_result.get("scientific_name")
+                    result["species_cn"] = species_result.get("common_name")
+                    result["confidence"] = species_result.get("confidence")
+                    result["source"] = "iNaturalist"
+
+            self.result_ready.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ConfigDialog(QDialog):
+    """Dialog for configuring API keys and settings."""
+
+    def __init__(self, config: Config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.setWindowTitle("⚙️ 配置设置")
+        self.setMinimumSize(500, 400)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # API Keys section
+        api_group = QGroupBox("🔑 API 配置")
+        api_layout = QFormLayout()
+
+        # iNaturalist
+        self.inat_key_edit = QLineEdit()
+        self.inat_key_edit.setPlaceholderText("输入 iNaturalist API Key")
+        self.inat_key_edit.setText(self.config.recognizer.inat_api_key)
+        self.inat_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        api_layout.addRow("iNaturalist:", self.inat_key_edit)
+
+        inat_help = QLabel(
+            "<small>iNaturalist API Key 申请: <a href='https://www.inaturalist.org/users/api_token'>https://www.inaturalist.org/users/api_token</a></small>"
+        )
+        inat_help.setOpenExternalLinks(True)
+        api_layout.addRow("", inat_help)
+
+        # eBird
+        self.ebird_key_edit = QLineEdit()
+        self.ebird_key_edit.setPlaceholderText("输入 eBird API Key")
+        self.ebird_key_edit.setText(self.config.recognizer.ebird_api_key)
+        self.ebird_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        api_layout.addRow("eBird:", self.ebird_key_edit)
+
+        ebird_help = QLabel(
+            "<small>eBird API Key 申请: <a href='https://ebird.org/st/request'>https://ebird.org/st/request</a></small>"
+        )
+        ebird_help.setOpenExternalLinks(True)
+        api_layout.addRow("", ebird_help)
+
+        api_group.setLayout(api_layout)
+        layout.addWidget(api_group)
+
+        # Quality settings
+        quality_group = QGroupBox("📊 质量评估设置")
+        quality_layout = QFormLayout()
+
+        self.quality_threshold = QSpinBox()
+        self.quality_threshold.setRange(0, 100)
+        self.quality_threshold.setValue(int(self.config.quality.threshold))
+        self.quality_threshold.setSuffix(" 分")
+        quality_layout.addRow("质量阈值:", self.quality_threshold)
+
+        self.dedup_threshold = QSpinBox()
+        self.dedup_threshold.setRange(0, 100)
+        self.dedup_threshold.setValue(int(self.config.dedup.similarity_threshold * 100))
+        self.dedup_threshold.setSuffix("%")
+        quality_layout.addRow("重复相似度阈值:", self.dedup_threshold)
+
+        quality_group.setLayout(quality_layout)
+        layout.addWidget(quality_group)
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_save(self):
+        """Save configuration."""
+        self.config.recognizer.inat_api_key = self.inat_key_edit.text()
+        self.config.recognizer.ebird_api_key = self.ebird_key_edit.text()
+        self.config.quality.threshold = float(self.quality_threshold.value())
+        self.config.dedup.similarity_threshold = self.dedup_threshold.value() / 100.0
+
+        self.config.save()
+        self.accept()
 
 
 class PhotoTableWidget(QTableWidget):
@@ -51,7 +201,6 @@ class PhotoTableWidget(QTableWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.verticalHeader().setVisible(False)
 
-        # Column widths
         header = self.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -88,33 +237,20 @@ class PhotoTableWidget(QTableWidget):
                 item.setBackground(Qt.GlobalColor.green)
             self.setItem(row, 2, item)
 
-            # Clarity
-            self.setItem(
-                row,
-                2,
-                QTableWidgetItem(f"{photo.clarity_score:.1f}" if photo.clarity_score else "N/A"),
-            )
-
-            # Focus
-            self.setItem(
-                row, 3, QTableWidgetItem(f"{photo.focus_score:.1f}" if photo.focus_score else "N/A")
-            )
-
-            # Sharpness
-            self.setItem(
-                row,
-                4,
-                QTableWidgetItem(
-                    f"{photo.sharpness_score:.1f}" if photo.sharpness_score else "N/A"
-                ),
-            )
+            # Other columns
+            for col, val in [
+                (3, photo.clarity_score),
+                (4, photo.focus_score),
+                (5, photo.sharpness_score),
+            ]:
+                self.setItem(row, col, QTableWidgetItem(f"{val:.1f}" if val else "N/A"))
 
             # Species
             species = photo.bird_species_cn or photo.bird_species or "-"
-            self.setItem(row, 5, QTableWidgetItem(species))
+            self.setItem(row, 6, QTableWidgetItem(species))
 
             # Status
-            self.setItem(row, 6, QTableWidgetItem(photo.status_text))
+            self.setItem(row, 7, QTableWidgetItem(photo.status_text))
 
             # Lock
             lock_btn = QPushButton("🔒" if photo.locked else "")
@@ -123,57 +259,99 @@ class PhotoTableWidget(QTableWidget):
             self.setCellWidget(row, 8, lock_btn)
 
     def _on_checkbox_changed(self, photo: PhotoItem, state):
-        """Handle checkbox state change."""
         photo.selected = state == Qt.CheckState.Checked.value
 
     def _on_lock_clicked(self, photo: PhotoItem):
-        """Handle lock button click."""
         photo.locked = not photo.locked
-        if photo.locked:
-            photo.selected = False
 
 
-class PreviewPanel(QFrame):
-    """Preview panel showing image and quality info."""
+class SingleImagePanel(QFrame):
+    """Panel for single image recognition."""
 
-    def __init__(self):
+    def __init__(self, config: Config):
         super().__init__()
-        self.setFrameStyle(QFrame.Shape.StyledPanel)
-        self.setMinimumSize(400, 300)
+        self.config = config
+        self.recognition_thread: Optional[RecognitionThread] = None
+        self._init_ui()
 
+    def _init_ui(self):
         layout = QVBoxLayout(self)
+        self.setFrameStyle(QFrame.Shape.StyledPanel)
+
+        # Toolbar
+        toolbar = QHBoxLayout()
+
+        load_btn = QPushButton("📂 选择图片")
+        load_btn.clicked.connect(self._on_load_image)
+        toolbar.addWidget(load_btn)
+
+        recognize_btn = QPushButton("🔍 识别")
+        recognize_btn.clicked.connect(self._on_recognize)
+        toolbar.addWidget(recognize_btn)
+
+        toolbar.addStretch()
+
+        lock_btn = QPushButton("🔒 锁定")
+        lock_btn.clicked.connect(self._on_lock)
+        toolbar.addWidget(lock_btn)
+
+        delete_btn = QPushButton("🗑️ 删除")
+        delete_btn.setStyleSheet("background-color: #ffcccc;")
+        delete_btn.clicked.connect(self._on_delete)
+        toolbar.addWidget(delete_btn)
+
+        layout.addLayout(toolbar)
 
         # Image preview
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Image
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(400, 250)
-        self.image_label.setStyleSheet("border: 1px solid #ccc;")
-        layout.addWidget(self.image_label)
+        self.image_label.setMinimumSize(400, 300)
+        self.image_label.setStyleSheet("border: 1px solid #ccc; background: #f5f5f5;")
+        splitter.addWidget(self.image_label)
 
         # Info panel
-        self.info_label = QLabel()
-        self.info_label.setStyleSheet("font-size: 12px; padding: 5px;")
-        layout.addWidget(self.info_label)
+        info_container = QWidget()
+        info_layout = QVBoxLayout(info_container)
 
-        self._current_photo: Optional[PhotoItem] = None
+        info_layout.addWidget(QLabel("<h3>📊 识别结果</h3>"))
 
-    def show_photo(self, photo: Optional[PhotoItem]):
-        """Show photo preview."""
-        self._current_photo = photo
+        self.result_text = QTextEdit()
+        self.result_text.setReadOnly(True)
+        self.result_text.setMaximumWidth(300)
+        info_layout.addWidget(self.result_text)
 
-        if photo is None:
-            self.image_label.setText("点击列表中的图片查看预览")
-            self.info_label.setText("")
-            return
+        splitter.addWidget(info_container)
 
-        # Load and display image
+        layout.addWidget(splitter)
+
+        # Progress
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        self.current_image_path: Optional[str] = None
+        self.current_photo: Optional[PhotoItem] = None
+
+    def _on_load_image(self):
+        """Load image for recognition."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图片", "", "Images (*.jpg *.jpeg *.png *.heic *.webp)"
+        )
+
+        if path:
+            self.current_image_path = path
+            self._display_image(path)
+
+    def _display_image(self, path: str):
+        """Display image."""
         try:
-            pixmap = QPixmap(str(photo.path))
-
-            # Scale to fit
+            pixmap = QPixmap(path)
             scaled = pixmap.scaled(
                 380,
-                230,
+                280,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
@@ -181,23 +359,90 @@ class PreviewPanel(QFrame):
         except Exception as e:
             self.image_label.setText(f"无法加载图片: {e}")
 
-        # Show info
-        info = photo.get_info_dict()
+        self.result_text.setText("点击「识别」开始分析图片")
 
-        info_text = f"""
-<table style="font-size: 12px; width: 100%;">
-<tr><td><b>文件:</b></td><td>{photo.filename}</td></tr>
-<tr><td><b>质量:</b></td><td>{info["quality"]}</td></tr>
-<tr><td><b>清晰度:</b></td><td>{info["clarity"]}</td></tr>
-<tr><td><b>对焦度:</b></td><td>{info["focus"]}</td></tr>
-<tr><td><b>锐利度:</b></td><td>{info["sharpness"]}</td></tr>
-<tr><td><b>鸟种:</b></td><td>{info["species"]}</td></tr>
-<tr><td><b>置信度:</b></td><td>{info["confidence"]}</td></tr>
-<tr><td><b>状态:</b></td><td>{info["status"]}</td></tr>
-<tr><td><b>路径:</b></td><td style="font-size: 10px;">{photo.path}</td></tr>
+    def _on_recognize(self):
+        """Run recognition on current image."""
+        if not self.current_image_path:
+            QMessageBox.warning(self, "提示", "请先选择图片")
+            return
+
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.result_text.setText("正在处理...")
+
+        self.recognition_thread = RecognitionThread(self.current_image_path, self.config)
+        self.recognition_thread.result_ready.connect(self._on_result_ready)
+        self.recognition_thread.progress.connect(self._on_progress)
+        self.recognition_thread.error.connect(self._on_error)
+        self.recognition_thread.start()
+
+    def _on_result_ready(self, result: dict):
+        """Handle recognition result."""
+        self.progress.setVisible(False)
+
+        # Update display
+        quality = result.get("quality", {})
+
+        html = f"""
+<h4>质量评估</h4>
+<table>
+<tr><td>综合质量:</td><td><b>{quality.get("score", "N/A"):.1f}</b></td></tr>
+<tr><td>清晰度:</td><td>{quality.get("clarity", "N/A"):.1f}</td></tr>
+<tr><td>对焦度:</td><td>{quality.get("focus", "N/A"):.1f}</td></tr>
+<tr><td>边缘锐利度:</td><td>{quality.get("sharpness", "N/A"):.1f}</td></tr>
+<tr><td>质量等级:</td><td>{quality.get("level", "N/A")}</td></tr>
 </table>
 """
-        self.info_label.setText(info_text)
+
+        if result.get("species"):
+            html += f"""
+<h4>物种识别</h4>
+<table>
+<tr><td>物种:</td><td><b>{result.get("species_cn") or result.get("species")}</b></td></tr>
+<tr><td>学名:</td><td><i>{result.get("species")}</i></td></tr>
+<tr><td>置信度:</td><td>{result.get("confidence", 0):.1%}</td></tr>
+<tr><td>来源:</td><td>{result.get("source", "N/A")}</td></tr>
+</table>
+"""
+        else:
+            html += "<p>未识别到鸟类</p>"
+
+        self.result_text.setHtml(html)
+
+    def _on_progress(self, message: str):
+        """Handle progress message."""
+        self.result_text.setText(message)
+
+    def _on_error(self, error: str):
+        """Handle error."""
+        self.progress.setVisible(False)
+        self.result_text.setText(f"错误: {error}")
+
+    def _on_lock(self):
+        """Toggle lock."""
+        QMessageBox.information(self, "锁定", "锁定功能：在列表模式下可用")
+
+    def _on_delete(self):
+        """Delete current image."""
+        if not self.current_image_path:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            "确定要将这张照片移到回收站吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                send2trash(self.current_image_path)
+                self.image_label.clear()
+                self.result_text.setText("已删除")
+                self.current_image_path = None
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"删除失败: {e}")
 
 
 class MainWindow(QMainWindow):
@@ -206,6 +451,7 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
 
+        self.config = get_config()
         self.model = PhotoModel()
         self.current_directory: Optional[Path] = None
 
@@ -216,39 +462,43 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, lambda: self.load_directory(initial_path))
 
     def _init_ui(self):
-        """Initialize UI components."""
+        """Initialize UI."""
         self.setWindowTitle("🐦 照片筛选工具")
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1000, 600)
 
-        # Central widget
         central = QWidget()
         self.setCentralWidget(central)
 
-        main_layout = QVBoxLayout(central)
+        layout = QVBoxLayout(central)
 
         # Toolbar
         toolbar = self._create_toolbar()
-        main_layout.addLayout(toolbar)
+        layout.addLayout(toolbar)
+
+        # Tab widget
+        self.tabs = QTabWidget()
+
+        # List mode
+        list_widget = QWidget()
+        list_layout = QVBoxLayout(list_widget)
 
         # Filter panel
         filter_panel = self._create_filter_panel()
-        main_layout.addWidget(filter_panel)
-
-        # Main splitter
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        list_layout.addWidget(filter_panel)
 
         # Table
         self.table = PhotoTableWidget()
         self.table.itemClicked.connect(self._on_table_item_clicked)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        splitter.addWidget(self.table)
+        list_layout.addWidget(self.table)
 
-        # Preview panel
-        self.preview = PreviewPanel()
-        splitter.addWidget(self.preview)
+        self.tabs.addTab(list_widget, "📋 列表模式")
 
-        splitter.setSizes([400, 300])
-        main_layout.addWidget(splitter)
+        # Single image mode
+        self.single_panel = SingleImagePanel(self.config)
+        self.tabs.addTab(self.single_panel, "🖼️ 单张识别")
+
+        layout.addWidget(self.tabs)
 
         # Status bar
         self.statusBar().showMessage("就绪")
@@ -257,78 +507,65 @@ class MainWindow(QMainWindow):
         """Create toolbar."""
         layout = QHBoxLayout()
 
-        # Scan button
-        self.scan_btn = QPushButton("📂 扫描目录")
-        self.scan_btn.clicked.connect(self._on_scan_clicked)
-        layout.addWidget(self.scan_btn)
+        scan_btn = QPushButton("📂 扫描目录")
+        scan_btn.clicked.connect(self._on_scan_clicked)
+        layout.addWidget(scan_btn)
 
-        # Refresh button
-        self.refresh_btn = QPushButton("🔄 刷新")
-        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
-        layout.addWidget(self.refresh_btn)
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.clicked.connect(self._on_refresh_clicked)
+        layout.addWidget(refresh_btn)
 
         layout.addStretch()
 
         # Selection buttons
-        self.select_all_btn = QPushButton("☑️ 全选")
-        self.select_all_btn.clicked.connect(self._on_select_all)
-        layout.addWidget(self.select_all_btn)
+        select_all_btn = QPushButton("☑️ 全选")
+        select_all_btn.clicked.connect(self._on_select_all)
+        layout.addWidget(select_all_btn)
 
-        self.deselect_btn = QPushButton("☐ 取消")
-        self.deselect_btn.clicked.connect(self._on_deselect_all)
-        layout.addWidget(self.deselect_btn)
+        deselect_btn = QPushButton("☐ 取消")
+        deselect_btn.clicked.connect(self._on_deselect_all)
+        layout.addWidget(deselect_btn)
 
-        # Delete button
-        self.delete_btn = QPushButton("🗑️ 删除选中")
-        self.delete_btn.setStyleSheet("background-color: #ffcccc;")
-        self.delete_btn.clicked.connect(self._on_delete_clicked)
-        layout.addWidget(self.delete_btn)
+        delete_btn = QPushButton("🗑️ 删除选中")
+        delete_btn.setStyleSheet("background-color: #ffcccc;")
+        delete_btn.clicked.connect(self._on_delete_clicked)
+        layout.addWidget(delete_btn)
 
-        # Stats label
-        self.stats_label = QLabel("总计: 0 张 | 已选: 0 张 | 锁定: 0 张")
+        self.stats_label = QLabel("总计: 0 | 已选: 0 | 锁定: 0")
         layout.addWidget(self.stats_label)
+
+        # Config button
+        config_btn = QPushButton("⚙️ 配置")
+        config_btn.clicked.connect(self._on_config_clicked)
+        layout.addWidget(config_btn)
 
         return layout
 
     def _create_filter_panel(self) -> QWidget:
         """Create filter panel."""
         group = QGroupBox("筛选条件")
-        layout = QHBoxLayout(group)
+        layout = QHBoxLayout()
 
-        # Quality threshold
         layout.addWidget(QLabel("质量 <"))
         self.quality_spin = QSpinBox()
         self.quality_spin.setRange(0, 100)
         self.quality_spin.setValue(40)
         self.quality_spin.setSuffix(" 分")
-        self.quality_spin.valueChanged.connect(self._on_filter_changed)
         layout.addWidget(self.quality_spin)
 
-        # Species filter
         layout.addWidget(QLabel("  鸟种:"))
         self.species_edit = QLineEdit()
         self.species_edit.setPlaceholderText("输入鸟种筛选...")
-        self.species_edit.textChanged.connect(self._on_filter_changed)
         layout.addWidget(self.species_edit)
-
-        # Quick filters
-        self.filter_duplicates_btn = QPushButton("筛选重复")
-        self.filter_duplicates_btn.clicked.connect(self._on_filter_duplicates)
-        layout.addWidget(self.filter_duplicates_btn)
-
-        self.filter_low_btn = QPushButton("筛选低质量")
-        self.filter_low_btn.clicked.connect(self._on_filter_low_quality)
-        layout.addWidget(self.filter_low_btn)
 
         layout.addStretch()
 
         return group
 
     def _init_menu(self):
-        """Initialize menu bar."""
+        """Initialize menu."""
         menubar = self.menuBar()
 
-        # File menu
         file_menu = menubar.addMenu("文件")
 
         open_action = QAction("打开目录", self)
@@ -344,7 +581,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
     def load_directory(self, path: str):
-        """Load directory and process photos."""
+        """Load directory."""
         dir_path = Path(path)
         if not dir_path.exists() or not dir_path.is_dir():
             QMessageBox.warning(self, "错误", "请选择有效的目录")
@@ -353,40 +590,21 @@ class MainWindow(QMainWindow):
         self.current_directory = dir_path
         self.setWindowTitle(f"🐦 照片筛选工具 - {dir_path}")
 
-        # Show progress
-        progress = QProgressDialog("正在扫描和处理照片...", "取消", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.show()
-
         try:
-            # Scan photos
-            progress.setValue(10)
-            QApplication.processEvents()
-
             scanner = ImageScanner()
             photos = scanner.scan(dir_path)
 
-            progress.setValue(30)
-            QApplication.processEvents()
-
             if not photos:
                 QMessageBox.information(self, "提示", "目录中没有找到图片")
-                progress.close()
                 return
 
-            # Process photos
-            config = Config()
-            engine = ProcessingEngine(config)
+            # Process
+            from src.processor.engine import ProcessingEngine
 
-            progress.setValue(50)
-            QApplication.processEvents()
-
+            engine = ProcessingEngine(self.config)
             result = engine.process(dir_path)
 
-            progress.setValue(80)
-            QApplication.processEvents()
-
-            # Convert to PhotoItem
+            # Convert
             photo_items = []
             for img in photos:
                 item = PhotoItem(
@@ -410,49 +628,40 @@ class MainWindow(QMainWindow):
             self.model.set_photos(photo_items)
             self.table.populate(self.model)
 
-            progress.setValue(100)
-            progress.close()
-
             self._update_status()
             self.statusBar().showMessage(f"已加载 {len(photo_items)} 张照片")
 
         except Exception as e:
-            progress.close()
             QMessageBox.critical(self, "错误", f"处理失败: {e}")
 
     def _update_status(self):
-        """Update status bar."""
+        """Update status."""
         total = len(self.model.photos)
         selected = self.model.get_selected_count()
         locked = self.model.get_locked_count()
-        self.stats_label.setText(f"总计: {total} 张 | 已选: {selected} 张 | 锁定: {locked}")
+        self.stats_label.setText(f"总计: {total} | 已选: {selected} | 锁定: {locked}")
 
     # Event handlers
     def _on_scan_clicked(self):
-        """Handle scan button click."""
         dir_path = QFileDialog.getExistingDirectory(self, "选择照片目录")
         if dir_path:
             self.load_directory(dir_path)
 
     def _on_refresh_clicked(self):
-        """Handle refresh button click."""
         if self.current_directory:
             self.load_directory(str(self.current_directory))
 
     def _on_select_all(self):
-        """Handle select all button."""
         self.model.select_all()
         self.table.populate(self.model)
         self._update_status()
 
     def _on_deselect_all(self):
-        """Handle deselect all button."""
         self.model.deselect_all()
         self.table.populate(self.model)
         self._update_status()
 
     def _on_delete_clicked(self):
-        """Handle delete button click."""
         selected = self.model.get_selected_photos()
         if not selected:
             QMessageBox.information(self, "提示", "请先选择要删除的照片")
@@ -473,48 +682,34 @@ class MainWindow(QMainWindow):
                     self.model.remove_photo(photo.index)
                     deleted += 1
                 except Exception as e:
-                    QMessageBox.warning(self, "警告", f"删除失败: {photo.filename}\n{e}")
+                    QMessageBox.warning(self, "警告", f"删除失败: {photo.filename}")
 
             self.table.populate(self.model)
             self._update_status()
             self.statusBar().showMessage(f"已删除 {deleted} 张照片")
 
     def _on_table_item_clicked(self, item):
-        """Handle table item click."""
         row = item.row()
         photo = self.model.get_photo(row)
         if photo:
-            self.preview.show_photo(photo)
+            self.single_panel.current_image_path = str(photo.path)
+            self.single_panel._display_image(str(photo.path))
+            self.tabs.setCurrentIndex(1)  # Switch to single mode
 
     def _on_selection_changed(self):
-        """Handle selection changed."""
         selected_rows = self.table.selectionModel().selectedRows()
         if selected_rows:
             row = selected_rows[0].row()
             photo = self.model.get_photo(row)
             if photo:
-                self.preview.show_photo(photo)
+                self.single_panel.current_image_path = str(photo.path)
+                self.single_panel._display_image(str(photo.path))
 
-    def _on_filter_changed(self):
-        """Handle filter change."""
-        threshold = self.quality_spin.value()
-        species = self.species_edit.text()
-
-        # This is a simple filter - in a full implementation,
-        # you would filter the table based on these criteria
-        pass
-
-    def _on_filter_duplicates(self):
-        """Filter to show only duplicates."""
-        for i, photo in enumerate(self.model.photos):
-            if photo.is_duplicate and not photo.locked:
-                self.table.selectRow(i)
-
-    def _on_filter_low_quality(self):
-        """Filter to show only low quality."""
-        for i, photo in enumerate(self.model.photos):
-            if photo.quality_level == "low" and not photo.locked:
-                self.table.selectRow(i)
+    def _on_config_clicked(self):
+        dialog = ConfigDialog(self.config, self)
+        if dialog.exec():
+            self.config = get_config()
+            self.single_panel.config = self.config
 
 
 def run_gui(initial_path: Optional[str] = None):

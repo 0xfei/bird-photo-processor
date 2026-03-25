@@ -44,10 +44,22 @@ enabled = true
 mode = "advanced"
 
 [recognizer]
-type = "birder"
+# 识别服务优先级: birder (本地) / inaturalist / ebird / all
+type = "all"
 model = "mvit_v2_t"
-inat_api_key = ""
 enabled = true
+
+[recognizer.inaturalist]
+# iNaturalist API Key 申请: https://www.inaturalist.org/users/api_token
+api_key = ""
+
+[recognizer.ebird]
+# eBird API Key 申请: https://ebird.org/st/request
+api_key = ""
+
+[recognizer.birdnet]
+# BirdNET API (可选)
+api_key = ""
 
 [file]
 auto_delete = false
@@ -99,10 +111,33 @@ class QualityConfig:
 
 @dataclass
 class RecognizerConfig:
-    type: str = "birder"
+    type: str = "all"  # birder / inaturalist / ebird / all
     model: str = "mvit_v2_t"
-    inat_api_key: str = ""
     enabled: bool = True
+
+    # iNaturalist API
+    inat_api_key: str = ""
+
+    # eBird API
+    ebird_api_key: str = ""
+
+    # BirdNET API
+    birdnet_api_key: str = ""
+
+
+@dataclass
+class INaturalistConfig:
+    api_key: str = ""
+
+
+@dataclass
+class EbirdConfig:
+    api_key: str = ""
+
+
+@dataclass
+class BirdnetConfig:
+    api_key: str = ""
 
 
 @dataclass
@@ -184,10 +219,20 @@ class Config:
 
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
+        # Flatten recognizer config
+        recognizer_data = {
+            "type": self.recognizer.type,
+            "model": self.recognizer.model,
+            "enabled": self.recognizer.enabled,
+            "api_key": self.recognizer.inat_api_key,
+            "ebird_api_key": self.recognizer.ebird_api_key,
+            "birdnet_api_key": self.recognizer.birdnet_api_key,
+        }
+
         return {
             "dedup": self.dedup.__dict__,
             "quality": self.quality.__dict__,
-            "recognizer": self.recognizer.__dict__,
+            "recognizer": recognizer_data,
             "file": self.file.__dict__,
             "organize": self.organize.__dict__,
             "device": self.device.__dict__,
