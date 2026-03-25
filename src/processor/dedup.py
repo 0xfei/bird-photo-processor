@@ -100,10 +100,51 @@ class Deduplicator:
 
         return img1.bird_species == img2.bird_species
 
-    def _is_within_time_interval(self, img1: ImageInfo, img2: ImageInfo) -> bool:
-        """Check if two images are within the minimum time interval."""
+    def _get_time_penalty(self, img1: ImageInfo, img2: ImageInfo) -> float:
+        """Calculate time-based penalty for duplicate detection.
+
+        Short burst photos are more likely to be duplicates (higher penalty).
+        Long interval photos might be different sessions (lower penalty).
+
+        Returns:
+            Penalty value (0-1): higher = more likely duplicate
+        """
         time_diff = abs(img1.created_time - img2.created_time)
-        return time_diff <= self.min_time_interval
+
+        # No penalty for very close photos (likely burst)
+        if time_diff <= 10:  # within 10 seconds
+            return 1.0
+
+        # Gradual penalty reduction for time intervals
+        # After max_time_interval, penalty becomes 0 (different sessions)
+        if time_diff >= self.min_time_interval:
+            return 0.0
+
+        # Linear interpolation
+        normalized = (self.min_time_interval - time_diff) / self.min_time_interval
+        return normalized
+
+    def _calculate_effective_similarity(
+        self, img1: ImageInfo, img2: ImageInfo, base_similarity: float
+    ) -> float:
+        """Calculate effective similarity with time weighting.
+
+        Photos taken in quick succession (burst) are more likely to be duplicates.
+        Photos taken at different times are less likely to be true duplicates.
+        """
+        time_penalty = self._get_time_penalty(img1, img2)
+
+        # Effective similarity = base + time bonus
+        # Quick burst photos get boosted similarity (more likely duplicates)
+        # Long interval photos get reduced similarity
+        effective = base_similarity * time_penalty
+
+        # Also apply species check: different species = not duplicate
+        if self.species_aware:
+            if not self._is_same_species(img1, img2):
+                return 0.0  # Different species, not a duplicate
+
+        return effective
 
     def find_duplicates(self, images: list[ImageInfo]) -> list[DuplicateGroup]:
         """Find duplicate images in the list."""
@@ -122,27 +163,16 @@ class Deduplicator:
                 if not img1.hash or not img2.hash:
                     continue
 
-                similarity = self._calculate_similarity(img1.hash, img2.hash)
+                base_similarity = self._calculate_similarity(img1.hash, img2.hash)
 
-                # Apply species-aware logic
-                if self.species_aware:
-                    # If different species, don't consider as duplicate
-                    if not self._is_same_species(img1, img2):
-                        continue
+                # Calculate effective similarity with time weighting
+                effective_similarity = self._calculate_effective_similarity(
+                    img1, img2, base_similarity
+                )
 
-                    # If within time interval, lower the threshold significantly
-                    if self._is_within_time_interval(img1, img2):
-                        # Require much higher similarity for same-time photos
-                        if similarity >= self.threshold:
-                            similar_pairs.append((i, j, similarity))
-                    else:
-                        # Different time, apply normal threshold
-                        if similarity >= self.threshold:
-                            similar_pairs.append((i, j, similarity))
-                else:
-                    # Not species-aware, use simple threshold
-                    if similarity >= self.threshold:
-                        similar_pairs.append((i, j, similarity))
+                # Apply threshold
+                if effective_similarity >= self.threshold:
+                    similar_pairs.append((i, j, effective_similarity))
 
         # Union-Find to group duplicates
         parent = list(range(n))
