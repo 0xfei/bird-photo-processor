@@ -20,12 +20,14 @@ dependencies = [
     "Pillow>=10.0.0",
     "imagehash>=4.3.0",
     "imagededup>=0.3.0",
-    "brisque>=0.2.0",
     "loguru>=0.7.0",
     "tomli>=2.0.0; python_version < '3.11'",
     "tomli-w>=1.1.0",
     "watchdog>=3.0.0",
     "send2trash>=1.8.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
 ]
 
 [project.optional-dependencies]
@@ -37,9 +39,16 @@ dev = [
     "pre-commit>=3.0.0",
 ]
 
-# 可选的鸟类识别依赖
+# 鸟类识别依赖
 birder = [
     "birder>=0.4.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+]
+
+# 备用质量评估算法
+brisque = [
+    "brisque>=0.2.0",
 ]
 
 # API 依赖
@@ -47,8 +56,9 @@ api = [
     "httpx>=0.25.0",
 ]
 
+# 一键安装所有依赖
 all = [
-    "bird-photo-processor[birder,api]",
+    "bird-photo-processor[birder,brisque,api]",
 ]
 
 [project.scripts]
